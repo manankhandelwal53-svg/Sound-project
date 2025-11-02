@@ -1,136 +1,109 @@
-#!/usr/bin/env python3
-"""
-sound_wallpaper_random.py
-
-🎧 Real-time sound level detector that randomly changes wallpaper
-based on noise level (Quiet / Moderate / Loud / Very Loud).
-
-Author: ChatGPT (as a senior Python + ML developer)
-"""
-
 import os
-import sys
-import math
-import time
-import queue
 import random
-import platform
-import numpy as np
+import time
+import ctypes
 import sounddevice as sd
-from colorama import Fore, Style, init as colorama_init
-from ctypes import windll  # for Windows wallpaper change
+import numpy as np
 
-colorama_init(autoreset=True)
+# ===============================================================
+# CONFIGURATION
+# ===============================================================
 
-# === Folder Paths ===
-BASE_PATH = "wallpapers"
-CATEGORIES = {
-    "Quiet": os.path.join(BASE_PATH, "quiet"),
-    "Moderate": os.path.join(BASE_PATH, "moderate"),
-    "Loud": os.path.join(BASE_PATH, "loud"),
-    "Very Loud": os.path.join(BASE_PATH, "very_loud"),
+# 👇 Your wallpaper base path
+BASE_PATH = r"D:\emotion\wallpapers"
+
+# Folder mapping
+WALLPAPER_PATHS = {
+    "quiet": os.path.join(BASE_PATH, "quiet"),
+    "moderate": os.path.join(BASE_PATH, "moderate"),
+    "loud": os.path.join(BASE_PATH, "loud"),
+    "very_loud": os.path.join(BASE_PATH, "very_loud")
 }
 
-# === Sound Classification Thresholds (adjust if needed) ===
-THRESHOLDS = {
-    'quiet': -40.0,
-    'moderate': -20.0,
-    'loud': -8.0
+# Thresholds (in decibels)
+THRESHOLDS_DB = {
+    "quiet": (-100, -40),
+    "moderate": (-40, -20),
+    "loud": (-20, -10),
+    "very_loud": (-10, 10)
 }
 
-# === Helper Functions ===
-def rms_to_dbfs(rms, ref=1.0):
-    if rms <= 0:
-        return -math.inf
-    return 20 * math.log10(rms / ref)
+# Time between checks (seconds)
+CHECK_INTERVAL = 2
 
 
-def classify_db(db_value):
-    if db_value <= THRESHOLDS['quiet']:
-        return "Quiet", Fore.GREEN
-    elif db_value <= THRESHOLDS['moderate']:
-        return "Moderate", Fore.YELLOW
-    elif db_value <= THRESHOLDS['loud']:
-        return "Loud", Fore.MAGENTA
-    else:
-        return "Very Loud", Fore.RED
+# ===============================================================
+# FUNCTIONS
+# ===============================================================
+
+def get_volume_db(duration=0.5):
+    """Capture short sound sample and return its decibel value."""
+    try:
+        audio = sd.rec(int(duration * 44100), samplerate=44100, channels=1, dtype='float64')
+        sd.wait()
+        rms = np.sqrt(np.mean(audio ** 2))
+        if rms <= 1e-10:
+            rms = 1e-10
+        db = 20 * np.log10(rms)
+        return db
+    except Exception as e:
+        print(f"[Error capturing audio] {e}")
+        return -100
 
 
-def get_random_wallpaper(folder):
-    """Pick a random image file from a folder."""
-    if not os.path.exists(folder):
-        print(Fore.RED + f"⚠️ Folder not found: {folder}")
-        return None
-    files = [f for f in os.listdir(folder)
-             if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
-    if not files:
-        print(Fore.RED + f"⚠️ No images found in {folder}")
-        return None
-    choice = random.choice(files)
-    return os.path.join(folder, choice)
+def classify_sound_level(db_value):
+    """Classify sound into quiet/moderate/loud/very_loud."""
+    for level, (low, high) in THRESHOLDS_DB.items():
+        if low <= db_value < high:
+            return level
+    return "quiet"
 
 
 def set_wallpaper(image_path):
-    """Change wallpaper according to OS."""
-    abs_path = os.path.abspath(image_path)
-    system = platform.system()
-
-    if not os.path.exists(abs_path):
-        print(Fore.RED + f"⚠️ Wallpaper not found: {abs_path}")
-        return
-
+    """Change the Windows wallpaper using full path."""
     try:
-        if system == "Windows":
-            windll.user32.SystemParametersInfoW(20, 0, abs_path, 3)
-        elif system == "Darwin":  # macOS
-            os.system(f"osascript -e 'tell application \"Finder\" to set desktop picture to POSIX file \"{abs_path}\"'")
-        elif system == "Linux":
-            os.system(f"gsettings set org.gnome.desktop.background picture-uri file://{abs_path}")
-        else:
-            print(Fore.RED + "❌ Unsupported OS for wallpaper change.")
+        abs_path = os.path.abspath(image_path)
+        ctypes.windll.user32.SystemParametersInfoW(20, 0, abs_path, 3)
+        # Force a desktop refresh for reliability
+        ctypes.windll.user32.UpdatePerUserSystemParameters(1)
+        print(f"✅ Wallpaper changed: {abs_path}\n")
     except Exception as e:
-        print(Fore.RED + f"Error changing wallpaper: {e}")
+        print(f"[Wallpaper error] {e}")
 
 
+def get_random_wallpaper(level):
+    """Get a random wallpaper from the respective folder."""
+    folder = WALLPAPER_PATHS[level]
+    files = [f for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    if not files:
+        print(f"⚠️ No wallpapers found in {folder}")
+        return None
+    return os.path.join(folder, random.choice(files))
+
+
+# ===============================================================
+# MAIN LOOP
+# ===============================================================
 def main():
-    samplerate = 22050
-    blockdur = 0.3
-    blocksize = int(round(blockdur * samplerate))
-    q = queue.Queue()
+    print("🎧 Sound-reactive wallpaper system started...")
+    print("Listening for sound changes... (Ctrl+C to stop)\n")
 
-    def callback(indata, frames, time_info, status):
-        if status:
-            pass
-        q.put(np.mean(indata, axis=1))
+    last_level = None
 
-    print("🎤 Starting sound monitor (random wallpaper mode)...")
-    print("Press Ctrl+C to stop.\n")
+    while True:
+        db = get_volume_db()
+        level = classify_sound_level(db)
 
-    current_label = None
+        print(f"Current Volume: {db:.2f} dB → Level: {level}")
 
-    try:
-        with sd.InputStream(channels=1, samplerate=samplerate,
-                            blocksize=blocksize, callback=callback):
-            while True:
-                block = q.get()
-                rms = np.sqrt(np.mean(block ** 2))
-                db_value = rms_to_dbfs(rms)
-                label, color = classify_db(db_value)
+        if level != last_level:
+            print(f"🔊 Sound level changed: {last_level} → {level}")
+            wallpaper_path = get_random_wallpaper(level)
+            if wallpaper_path:
+                set_wallpaper(wallpaper_path)
+            last_level = level
 
-                if label != current_label:
-                    current_label = label
-                    print(color + f"🔊 {label} | {db_value:.2f} dBFS")
-                    wallpaper_folder = CATEGORIES[label]
-                    random_wall = get_random_wallpaper(wallpaper_folder)
-                    if random_wall:
-                        set_wallpaper(random_wall)
-
-                time.sleep(blockdur)
-
-    except KeyboardInterrupt:
-        print(Fore.CYAN + "\n🛑 Stopped by user.")
-    except Exception as e:
-        print(Fore.RED + f"Error: {e}")
+        time.sleep(CHECK_INTERVAL)
 
 
 if __name__ == "__main__":
